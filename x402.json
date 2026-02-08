@@ -1,0 +1,38 @@
+{
+  "name": "Agent Memory API",
+  "description": "Persistent encrypted memory storage for AI agents - rent a brain for your agent",
+  "version": "1.0.0",
+  "author": "ppsllc4-byte",
+  "category": "agent-infrastructure",
+  "endpoint": "https://agent-memory-api-production.up.railway.app",
+  "pricing": {
+    "model": "pay-per-use",
+    "store": 0.001,
+    "retrieve": 0.001,
+    "search": 0.005,
+    "currency": "USD"
+  },
+  "endpoints": {
+    "store": {
+      "method": "POST",
+      "path": "/memory/store",
+      "description": "Store encrypted memory"
+    },
+    "retrieve": {
+      "method": "GET",
+      "path": "/memory/{memory_id}",
+      "description": "Retrieve decrypted memory"
+    },
+    "search": {
+      "method": "POST",
+      "path": "/memory/search",
+      "description": "Search agent memories"
+    },
+    "stats": {
+      "method": "GET",
+      "path": "/agent/{agent_id}/stats",
+      "description": "Agent memory statistics (FREE)"
+    }
+  },
+  "tags": ["memory", "storage", "context", "persistence", "encryption", "agent-brain", "knowledge"]
+}
