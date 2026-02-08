@@ -1,20 +1,28 @@
-from fastapi import FastAPI, HTTPException, Header, Query
+from fastapi import FastAPI, HTTPException, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 import os
 from dotenv import load_dotenv
 from datetime import datetime
 from database import db
 from payment import PaymentProcessor, verify_payment_token
+from api_keys import api_key_manager
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 load_dotenv()
 
 app = FastAPI(
     title="Agent Memory API",
-    description="Persistent memory and context storage for AI agents - rent a brain for your agent",
-    version="1.0.0"
+    description="Persistent memory and context storage for AI agents",
+    version="2.0.0"
 )
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -24,87 +32,67 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Models
 class MemoryStore(BaseModel):
-    agent_id: str
-    content: str
-    tags: Optional[List[str]] = []
+    agent_id: str = Field(..., min_length=1, max_length=100)
+    content: str = Field(..., min_length=1, max_length=100000)
+    tags: Optional[List[str]] = Field(default=[], max_length=10)
     metadata: Optional[Dict[str, Any]] = {}
-    ttl_days: Optional[int] = 30
+    ttl_days: Optional[int] = Field(default=30, ge=0, le=365)
 
 class MemorySearch(BaseModel):
-    agent_id: str
-    query: Optional[str] = None
-    tags: Optional[List[str]] = None
-    limit: Optional[int] = 10
+    agent_id: str = Field(..., min_length=1, max_length=100)
+    query: Optional[str] = Field(None, max_length=500)
+    tags: Optional[List[str]] = Field(None, max_length=10)
+    limit: Optional[int] = Field(default=10, ge=1, le=100)
 
-class MemoryResponse(BaseModel):
-    memory_id: str
-    agent_id: str
-    content: str
-    tags: List[str]
-    metadata: Dict[str, Any]
-    created_at: str
-    expires_at: Optional[str]
-    access_count: int
-
-# Endpoints
 @app.get("/")
-async def root():
+@limiter.limit("100/minute")
+async def root(request: Request):
     return {
         "message": "Agent Memory API - Persistent Memory for AI Agents",
         "tagline": "Rent a brain for your agent",
-        "version": "1.0.0",
+        "version": "2.0.0",
+        "security": "API key authentication + rate limiting enabled",
         "endpoints": {
             "store": "POST /memory/store",
             "retrieve": "GET /memory/{memory_id}",
             "search": "POST /memory/search",
             "delete": "DELETE /memory/{memory_id}",
             "stats": "GET /agent/{agent_id}/stats",
-            "purchase": "POST /purchase",
-            "docs": "/docs"
+            "credits": "GET /credits/check"
         }
     }
 
 @app.get("/health")
-async def health_check():
+@limiter.limit("100/minute")
+async def health_check(request: Request):
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
         "database": "operational",
-        "encryption": "active"
+        "encryption": "active",
+        "authentication": "enabled",
+        "version": "2.0.0"
     }
 
 @app.post("/memory/store")
+@limiter.limit("60/minute")
 async def store_memory(
+    request: Request,
     memory: MemoryStore,
     authorization: Optional[str] = Header(None)
 ):
-    """
-    Store encrypted memory for an agent
+    """Store encrypted memory (1 credit = $0.001)"""
     
-    Cost: $0.001 per memory stored
-    
-    Args:
-    - agent_id: Your agent's unique identifier
-    - content: The memory/context to store (encrypted automatically)
-    - tags: Optional tags for organization
-    - metadata: Optional metadata
-    - ttl_days: Time-to-live in days (default: 30, 0 = never expires)
-    
-    Returns memory_id for future retrieval
-    """
-    
-    # Verify payment
-    is_authorized = await verify_payment_token(authorization)
+    is_authorized = await verify_payment_token(authorization, cost_in_credits=1)
     
     if not is_authorized:
         raise HTTPException(
             status_code=402,
             detail={
                 "error": "Payment required",
-                "message": "Memory storage requires payment",
-                "pricing": "$0.001 per memory stored",
+                "message": "Invalid API key or insufficient credits",
+                "pricing": "$0.001 per memory stored (1 credit)",
                 "get_credits": "/purchase"
             }
         )
@@ -117,7 +105,6 @@ async def store_memory(
             metadata=memory.metadata,
             ttl_days=memory.ttl_days
         )
-        
         return {
             "status": "success",
             "memory_id": result["memory_id"],
@@ -126,85 +113,59 @@ async def store_memory(
             "expires_at": result["expires_at"],
             "message": "Memory stored and encrypted successfully"
         }
-        
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Storage failed: {str(e)}")
 
 @app.get("/memory/{memory_id}")
+@limiter.limit("100/minute")
 async def retrieve_memory(
+    request: Request,
     memory_id: str,
     authorization: Optional[str] = Header(None)
 ):
-    """
-    Retrieve and decrypt a stored memory
+    """Retrieve and decrypt memory (1 credit = $0.001)"""
     
-    Cost: $0.001 per retrieval
-    
-    Returns decrypted memory content with metadata
-    """
-    
-    # Verify payment
-    is_authorized = await verify_payment_token(authorization)
+    is_authorized = await verify_payment_token(authorization, cost_in_credits=1)
     
     if not is_authorized:
         raise HTTPException(
             status_code=402,
             detail={
                 "error": "Payment required",
-                "message": "Memory retrieval requires payment",
-                "pricing": "$0.001 per retrieval",
+                "message": "Invalid API key or insufficient credits",
+                "pricing": "$0.001 per retrieval (1 credit)",
                 "get_credits": "/purchase"
             }
         )
     
     try:
         memory = await db.retrieve_memory(memory_id)
-        
         if not memory:
-            raise HTTPException(
-                status_code=404,
-                detail="Memory not found or expired"
-            )
-        
-        return {
-            "status": "success",
-            "memory": memory
-        }
-        
+            raise HTTPException(status_code=404, detail="Memory not found or expired")
+        return {"status": "success", "memory": memory}
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Retrieval failed: {str(e)}")
 
 @app.post("/memory/search")
+@limiter.limit("30/minute")
 async def search_memories(
+    request: Request,
     search: MemorySearch,
     authorization: Optional[str] = Header(None)
 ):
-    """
-    Search through agent's memories
+    """Search memories (5 credits = $0.005)"""
     
-    Cost: $0.005 per search
-    
-    Args:
-    - agent_id: Your agent's ID
-    - query: Optional text to search for in content
-    - tags: Optional tags to filter by
-    - limit: Max results (default: 10)
-    
-    Returns matching memories with previews
-    """
-    
-    # Verify payment
-    is_authorized = await verify_payment_token(authorization)
+    is_authorized = await verify_payment_token(authorization, cost_in_credits=5)
     
     if not is_authorized:
         raise HTTPException(
             status_code=402,
             detail={
                 "error": "Payment required",
-                "message": "Memory search requires payment",
-                "pricing": "$0.005 per search",
+                "message": "Invalid API key or insufficient credits",
+                "pricing": "$0.005 per search (5 credits)",
                 "get_credits": "/purchase"
             }
         )
@@ -216,171 +177,132 @@ async def search_memories(
             tags=search.tags,
             limit=search.limit or 10
         )
-        
         return {
             "status": "success",
             "agent_id": search.agent_id,
             "results": results,
             "count": len(results)
         }
-        
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
 @app.delete("/memory/{memory_id}")
+@limiter.limit("100/minute")
 async def delete_memory(
+    request: Request,
     memory_id: str,
     agent_id: str = Query(...),
     authorization: Optional[str] = Header(None)
 ):
-    """
-    Delete a stored memory
+    """Delete memory (FREE)"""
     
-    Free operation (you paid to store it)
-    
-    Args:
-    - memory_id: The memory to delete
-    - agent_id: Your agent ID (for verification)
-    """
-    
-    # Verify payment (light check for deletion)
-    is_authorized = await verify_payment_token(authorization)
-    
-    if not is_authorized:
+    if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Authorization required")
     
     try:
         success = await db.delete_memory(memory_id, agent_id)
-        
         if not success:
-            raise HTTPException(
-                status_code=404,
-                detail="Memory not found or unauthorized"
-            )
-        
-        return {
-            "status": "success",
-            "memory_id": memory_id,
-            "message": "Memory deleted successfully"
-        }
-        
+            raise HTTPException(status_code=404, detail="Memory not found or unauthorized")
+        return {"status": "success", "memory_id": memory_id}
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Deletion failed: {str(e)}")
 
 @app.get("/agent/{agent_id}/stats")
-async def get_agent_stats(agent_id: str):
-    """
-    Get agent's memory statistics
-    
-    Free endpoint - check your memory usage
-    """
+@limiter.limit("100/minute")
+async def get_agent_stats(request: Request, agent_id: str):
+    """Get agent memory statistics (FREE)"""
     try:
         stats = await db.get_agent_stats(agent_id)
-        
         if not stats:
             return {
                 "agent_id": agent_id,
                 "active_memories": 0,
                 "total_memories_stored": 0,
-                "storage_used_mb": 0.0,
-                "message": "No memories stored yet"
+                "storage_used_mb": 0.0
             }
-        
         return stats
-        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Stats retrieval failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Stats failed: {str(e)}")
+
+@app.get("/credits/check")
+@limiter.limit("100/minute")
+async def check_credits(request: Request, authorization: Optional[str] = Header(None)):
+    """Check remaining credits"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid authorization header")
+    api_key = authorization.replace("Bearer ", "").strip()
+    credits = api_key_manager.get_credits(api_key)
+    if credits is None:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    return {"credits_remaining": credits, "status": "active" if credits > 0 else "depleted"}
+
+@app.post("/admin/create-api-key")
+async def create_api_key(
+    user_email: str,
+    credits: int = 1000,
+    admin_secret: str = Header(None, alias="X-Admin-Secret")
+):
+    """Admin: Create API key"""
+    if admin_secret != os.getenv("API_SECRET_KEY"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    api_key = api_key_manager.create_key(user_email, credits)
+    return {
+        "status": "success",
+        "api_key": api_key,
+        "user_email": user_email,
+        "credits": credits,
+        "message": "SAVE THIS KEY!"
+    }
 
 @app.post("/admin/cleanup")
 async def cleanup_expired(authorization: Optional[str] = Header(None)):
-    """
-    Admin endpoint: Clean up expired memories
-    """
-    # Simple admin auth
+    """Admin: Clean expired memories"""
     if authorization != f"Bearer {os.getenv('API_SECRET_KEY')}":
         raise HTTPException(status_code=403, detail="Forbidden")
-    
     try:
         count = await db.cleanup_expired()
-        return {
-            "status": "success",
-            "expired_cleaned": count,
-            "timestamp": datetime.utcnow().isoformat()
-        }
+        return {"status": "success", "expired_cleaned": count, "timestamp": datetime.utcnow().isoformat()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Cleanup failed: {str(e)}")
 
 @app.post("/purchase")
-async def purchase_credits(
-    credits: int = 1000,
-    service_type: str = "memory_credits",
-    email: Optional[str] = None
-):
-    """
-    Purchase memory API credits
-    
-    Args:
-    - credits: Number of operations to purchase
-    - service_type: "store", "retrieve", "search", or "memory_credits"
-    - email: Optional email for receipt
-    
-    Returns Stripe checkout URL
-    """
+@limiter.limit("10/minute")
+async def purchase_credits(request: Request, credits: int = 1000, service_type: str = "memory_credits", email: Optional[str] = None):
+    """Purchase memory API credits"""
     if credits < 1 or credits > 100000:
         raise HTTPException(status_code=400, detail="Credits must be between 1 and 100,000")
-    
     base_url = os.getenv("BASE_URL", "https://agent-memory-api-production.up.railway.app")
-    
     session = await PaymentProcessor.create_checkout_session(
         success_url=f"{base_url}/payment/success?session_id={{CHECKOUT_SESSION_ID}}",
         cancel_url=f"{base_url}/payment/cancel",
         quantity=credits,
         service_type=service_type
     )
-    
-    return {
-        "checkout_url": session['url'],
-        "session_id": session['session_id'],
-        "total_amount": session['amount_total'],
-        "credits": credits,
-        "service_type": service_type,
-        "message": "Complete payment at checkout_url to receive your API key"
-    }
+    return {"checkout_url": session['url'], "session_id": session['session_id'], "total_amount": session['amount_total'], "credits": credits}
 
 @app.get("/payment/success")
 async def payment_success(session_id: str):
-    return {
-        "status": "success",
-        "message": "Payment successful! Your API key will be sent to your email.",
-        "session_id": session_id,
-        "next_steps": "Check your email for your API key and usage instructions"
-    }
+    return {"status": "success", "message": "Payment successful!", "session_id": session_id}
 
 @app.get("/payment/cancel")
 async def payment_cancel():
-    return {
-        "status": "cancelled",
-        "message": "Payment was cancelled. You can try again at /purchase"
-    }
+    return {"status": "cancelled", "message": "Payment cancelled"}
 
 @app.get("/pricing")
-async def get_pricing():
+@limiter.limit("100/minute")
+async def get_pricing(request: Request):
     return {
-        "store_memory": "$0.001 per memory stored",
-        "retrieve_memory": "$0.001 per retrieval",
-        "search_memories": "$0.005 per search",
+        "store_memory": "$0.001 per memory (1 credit)",
+        "retrieve_memory": "$0.001 per retrieval (1 credit)",
+        "search_memories": "$0.005 per search (5 credits)",
         "delete_memory": "FREE",
-        "agent_stats": "FREE",
-        "storage_limits": "Unlimited (pay for what you use)",
-        "retention": "30 days default, configurable up to forever",
-        "encryption": "AES-256 encryption included",
-        "payment_methods": ["stripe"],
+        "encryption": "AES-256 included",
         "bulk_pricing": {
-            "1000_operations": "$1.00",
-            "10000_operations": "$10.00",
-            "100000_operations": "$100.00"
+            "1000_credits": "$1.00",
+            "10000_credits": "$10.00",
+            "100000_credits": "$100.00"
         }
     }
 

@@ -1,0 +1,46 @@
+
+# ADD THIS ENDPOINT TO main.py (after the existing endpoints, before if __name__)
+
+@app.post("/admin/create-api-key")
+async def create_api_key(
+    user_email: str,
+    credits: int = 1000,
+    admin_secret: str = Header(None, alias="X-Admin-Secret")
+):
+    """
+    Admin endpoint to create API keys
+    Requires admin secret key
+    """
+    if admin_secret != os.getenv("API_SECRET_KEY"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    
+    from api_keys import api_key_manager
+    
+    api_key = api_key_manager.create_key(user_email, credits)
+    
+    return {
+        "status": "success",
+        "api_key": api_key,
+        "user_email": user_email,
+        "credits": credits,
+        "message": "SAVE THIS KEY! It will not be shown again."
+    }
+
+@app.get("/credits/check")
+async def check_credits(authorization: Optional[str] = Header(None)):
+    """Check remaining credits for an API key"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid authorization header")
+    
+    api_key = authorization.replace("Bearer ", "").strip()
+    
+    from api_keys import api_key_manager
+    credits = api_key_manager.get_credits(api_key)
+    
+    if credits is None:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    return {
+        "credits_remaining": credits,
+        "status": "active" if credits > 0 else "depleted"
+    }

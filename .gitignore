@@ -14,3 +14,5 @@ ENV/
 Thumbs.db
 *.log
 memories_db.json
+api_keys_db.json
+api_keys_db.json

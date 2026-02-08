@@ -6,3 +6,4 @@ python-multipart==0.0.18
 stripe==7.10.0
 cryptography==44.0.0
 python-dateutil==2.9.0
+slowapi==0.1.9
